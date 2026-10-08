@@ -2,7 +2,7 @@
    앱 파일만 캐시에 담아 인터넷 없이도 실행되게 합니다.
    학생 기록은 절대 캐시하지 않습니다(애초에 서버로 가지 않습니다). */
 
-const VERSION = 'v1.4.0';
+const VERSION = 'v1.4.1';
 const CACHE = 'interview-prep-' + VERSION;
 
 const SHELL = [

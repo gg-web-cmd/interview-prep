@@ -2576,7 +2576,7 @@ const saveShared=()=>{
 $('#sharedCode').addEventListener('input',refreshAiMode);
 $('#sharedTest').onclick=async()=>{
   const o=$('#sharedOut'); o.textContent='확인 중…'; o.style.color='';
-  try{ await callShared('', '', true); o.textContent='✓ 접속 코드 확인됨'; o.style.color='var(--brand)';
+  try{ await callShared('', '', true); o.textContent='✓ 접속 코드 확인 · 공용 Upstage 연결 정상'; o.style.color='var(--brand)';
        document.querySelector('input[name="aiRoute"][value="shared"]').checked=true; store('ai_route','shared'); saveShared(); }
   catch(e){ o.textContent='✗ '+e.message; o.style.color='var(--accent)'; }
 };
