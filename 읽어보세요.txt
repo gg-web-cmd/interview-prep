@@ -23,7 +23,10 @@
 
   1) 설정 탭 → 제공사 "Upstage · Solar" 선택
      모델은 solar-pro4 (비워 두면 자동)
+       ※ solar-pro2·solar-pro3은 2026년 10월 30일 종료 예정이라 쓰지 마세요.
      API 키는 https://console.upstage.ai/api-keys 에서 발급
+     API 주소는 보통 비워 둡니다 (기본: https://api.upstage.ai/v1/chat/completions).
+       학교·교육청이 따로 안내한 중계 주소가 있을 때만 https:// 주소를 넣으세요.
      → [연결 확인] 버튼으로 키가 맞는지 먼저 테스트하세요.
 
   2) 업로드 탭에서 학생의 "학년"을 고르세요. 학년에 따라 보고서가 달라집니다.

@@ -514,8 +514,6 @@ tbody tr:hover{background:var(--panel-2)}
         <input type="text" id="aiModel" list="modelList" placeholder="solar-pro4">
         <datalist id="modelList">
           <option value="solar-pro4">Upstage · 최신 (권장)</option>
-          <option value="solar-pro3">Upstage</option>
-          <option value="solar-pro2">Upstage · 구버전</option>
           <option value="solar-mini4">Upstage · 가볍고 저렴</option>
           <option value="claude-sonnet-5">Anthropic</option>
           <option value="gpt-4o-mini">OpenAI</option>
@@ -523,6 +521,9 @@ tbody tr:hover{background:var(--panel-2)}
       </div>
     </div>
     <div class="field"><label class="fl">API 키</label><input type="password" id="aiKey" placeholder="키는 이 브라우저에만 저장되며 다른 곳으로 보내지 않습니다" autocomplete="off"></div>
+    <div class="field"><label class="fl">API 주소 (선택)</label><input type="text" id="aiUrl" placeholder="비워 두면 기본 주소: https://api.upstage.ai/v1/chat/completions" autocomplete="off" spellcheck="false">
+      <p class="tiny muted" style="margin:5px 0 0">보통은 비워 두세요. 학교·교육청에서 별도 중계 주소를 안내받았거나 OpenAI 호환 주소를 쓸 때만 넣습니다. <b>https://</b> 주소만 받습니다.</p></div>
+    <p class="tiny muted" style="margin:0 0 12px">solar-pro2·solar-pro3는 2026년 10월 30일 종료 예정이라 목록에서 뺐습니다. <b>solar-pro4</b>를 쓰세요.</p>
     <div class="row"><button class="btn sm" id="aiTest">연결 확인</button><span class="small muted" id="aiTestOut"></span></div>
     <div class="row"><button class="btn primary" id="aiSave">저장</button><span class="small muted" id="aiSaved"></span></div>
     <div class="note warn small" style="margin-top:14px">공용 컴퓨터에는 키를 저장하지 마세요. 키는 <code>localStorage</code>에 평문으로 남습니다.</div>
@@ -1504,41 +1505,40 @@ function buildPlan(){
    AI 호출
    ============================================================ */
 async function callAI(prompt, system){
-  const prov=load('ai_prov',''), key=load('ai_key',''), model=load('ai_model','');
+  // 저장소(localStorage)를 못 쓰는 환경(시크릿 창 등)에서는 설정 칸에 입력된 값을 바로 씁니다
+  const fv=id=>{ const e=document.getElementById(id); return e? e.value.trim() : ''; };
+  const prov=load('ai_prov','')||fv('aiProv'), key=load('ai_key','')||fv('aiKey'), model=load('ai_model','')||fv('aiModel');
   if(!prov||!key) throw new Error('설정에서 제공사와 API 키를 먼저 넣어 주세요.');
-  if(prov==='upstage'){
-    // Upstage Solar — OpenAI 호환. 브라우저에서 직접 호출이 허용됩니다(CORS 개방).
-    const msgs=[];
-    if(system) msgs.push({role:'system',content:system});
-    msgs.push({role:'user',content:prompt});
-    const r=await fetch('https://api.upstage.ai/v1/chat/completions',{
-      method:'POST',
-      headers:{'content-type':'application/json','authorization':'Bearer '+key},
-      body:JSON.stringify({model:model||'solar-pro4',messages:msgs,temperature:0.3})
-    });
-    const j=await r.json().catch(()=>({}));
-    if(!r.ok) throw new Error(j.error?.message||('HTTP '+r.status));
-    return j.choices?.[0]?.message?.content||'';
-  }
+  const custom=(load('ai_url','')||fv('aiUrl')||'').trim();
+  if(custom && !/^https:\/\/\S+$/.test(custom)) throw new Error('API 주소는 https:// 로 시작해야 합니다.');
+  const errOf=(j,r)=>{
+    const raw=String((j&&j.error&&(j.error.message||j.error))||('HTTP '+r.status));
+    const hint = r.status===401 || /api key|invalid_api_key|unauthorized/i.test(raw) ? 'API 키가 올바르지 않습니다. 콘솔에서 키를 다시 복사해 붙여넣어 주세요.'
+               : r.status===404 || /model.*(not found|does not exist)/i.test(raw) ? '모델 이름이나 API 주소를 확인해 주세요. (권장 모델: solar-pro4)'
+               : r.status===429 ? '요청 한도를 넘었거나 잔액이 부족합니다. 잠시 후 다시 시도하거나 콘솔에서 결제 상태를 확인해 주세요.'
+               : r.status>=500 ? 'AI 서버 쪽 일시 오류입니다. 잠시 후 다시 시도해 주세요.' : '';
+    return new Error(hint ? `${hint} (원문: ${raw.slice(0,80)})` : raw);
+  };
+
   if(prov==='anthropic'){
-    const r=await fetch('https://api.anthropic.com/v1/messages',{
+    const r=await fetch(custom||'https://api.anthropic.com/v1/messages',{
       method:'POST',
       headers:{'content-type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body:JSON.stringify({model:model||'claude-sonnet-5',max_tokens:4000,messages:[{role:'user',content:prompt}]})
+      body:JSON.stringify(Object.assign({model:model||'claude-sonnet-5',max_tokens:8000,messages:[{role:'user',content:prompt}]}, system?{system}:{}))
     });
-    const j=await r.json();
-    if(!r.ok) throw new Error(j.error?.message||('HTTP '+r.status));
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok) throw errOf(j,r);
     return (j.content||[]).map(c=>c.text||'').join('');
-  } else {
-    const r=await fetch('https://api.openai.com/v1/chat/completions',{
-      method:'POST',
-      headers:{'content-type':'application/json','authorization':'Bearer '+key},
-      body:JSON.stringify({model:model||'gpt-4o-mini',messages:[{role:'user',content:prompt}]})
-    });
-    const j=await r.json();
-    if(!r.ok) throw new Error(j.error?.message||('HTTP '+r.status));
-    return j.choices?.[0]?.message?.content||'';
   }
+  // Upstage Solar · OpenAI — 둘 다 OpenAI 호환 형식. Upstage는 브라우저 직접 호출(CORS)을 허용합니다.
+  const url = custom || (prov==='upstage' ? 'https://api.upstage.ai/v1/chat/completions' : 'https://api.openai.com/v1/chat/completions');
+  const msgs=[]; if(system) msgs.push({role:'system',content:system}); msgs.push({role:'user',content:prompt});
+  const body={model:model||(prov==='upstage'?'solar-pro4':'gpt-4o-mini'), messages:msgs};
+  if(prov==='upstage') body.temperature=0.3;
+  const r=await fetch(url,{method:'POST', headers:{'content-type':'application/json','authorization':'Bearer '+key}, body:JSON.stringify(body)});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok) throw errOf(j,r);
+  return (j.choices&&j.choices[0]&&j.choices[0].message&&j.choices[0].message.content)||'';
 }
 
 /* ============================================================
@@ -1676,7 +1676,8 @@ function refreshAiMode(){
   const m=aiMode();
   const lab=$('#aiModeLabel');
   if(lab) lab.textContent = m===3 ? '3학년 · 예상 면접 질문 보고서' : '1·2학년 · 보강 활동 조언 보고서';
-  const prov=load('ai_prov',''), key=load('ai_key','');
+  const fv=id=>{ const e=document.getElementById(id); return e? e.value.trim() : ''; };
+  const prov=load('ai_prov','')||fv('aiProv'), key=load('ai_key','')||fv('aiKey');
   const st=$('#aiStatus2');
   if(st) st.textContent = (prov && key)
     ? `${prov} · ${load('ai_model','')||'기본 모델'} 연결 준비됨`
@@ -2323,7 +2324,7 @@ $('#aiReportPrint').onclick=()=>window.print();
 // 연결 확인
 $('#aiTest').onclick=async()=>{
   const o=$('#aiTestOut'); o.textContent='확인 중…';
-  store('ai_prov',$('#aiProv').value); store('ai_model',$('#aiModel').value.trim()); store('ai_key',$('#aiKey').value.trim());
+  store('ai_prov',$('#aiProv').value); store('ai_model',$('#aiModel').value.trim()); store('ai_key',$('#aiKey').value.trim()); store('ai_url',$('#aiUrl').value.trim());
   try{
     const r=await callAI('연결 확인입니다. "확인됨" 네 글자만 답하세요.','당신은 간결하게 답합니다.');
     o.textContent='✓ 응답 받음: '+String(r).slice(0,30);
@@ -2337,6 +2338,7 @@ function loadSettings(){
   $('#aiProv').value=load('ai_prov','')||'';
   $('#aiModel').value=load('ai_model','')||'';
   $('#aiKey').value=load('ai_key','')||'';
+  $('#aiUrl').value=load('ai_url','')||'';
   $('#maskList').value=load('mask_rules','')||'';
   $('#aiState').textContent = load('ai_key','')? `${load('ai_prov','')} 연결 준비됨` : '설정에서 API 키를 먼저 넣어 주세요.';
   // 제공사를 고르면 기본 모델 이름을 채워 둡니다
@@ -2347,12 +2349,12 @@ function loadSettings(){
   refreshAiMode();
 }
 $('#aiSave').onclick=()=>{
-  store('ai_prov',$('#aiProv').value); store('ai_model',$('#aiModel').value.trim()); store('ai_key',$('#aiKey').value.trim());
+  store('ai_prov',$('#aiProv').value); store('ai_model',$('#aiModel').value.trim()); store('ai_key',$('#aiKey').value.trim()); store('ai_url',$('#aiUrl').value.trim());
   $('#aiSaved').textContent='저장됨'; loadSettings(); toast('저장했습니다');
 };
 $('#maskSave').onclick=()=>{ store('mask_rules',$('#maskList').value); renderAll(); toast('비식별화 규칙을 저장했습니다'); };
 $('#expSet').onclick=()=>{
-  const d={univ_cards:load('univ_cards',[]),mask_rules:load('mask_rules',''),ai_prov:load('ai_prov',''),ai_model:load('ai_model','')};
+  const d={univ_cards:load('univ_cards',[]),mask_rules:load('mask_rules',''),ai_prov:load('ai_prov',''),ai_model:load('ai_model',''),ai_url:load('ai_url','')};
   const a=document.createElement('a');
   a.href=URL.createObjectURL(new Blob([JSON.stringify(d,null,2)],{type:'application/json'}));
   a.download='면접준비기_설정.json'; a.click();
@@ -2363,7 +2365,7 @@ $('#impFile').onchange=async e=>{
   try{ const d=JSON.parse(await f.text()); Object.entries(d).forEach(([k,v])=>store(k,v)); loadSettings(); renderUniv(); toast('가져왔습니다'); }
   catch(err){ toast('파일을 읽지 못했습니다'); }
 };
-$('#resetAll').onclick=()=>{ if(confirm('대학 카드·API 키·비식별화 규칙을 모두 지울까요?')){ ['univ_cards','mask_rules','ai_prov','ai_model','ai_key','theme'].forEach(k=>store(k,undefined)); loadSettings(); renderUniv(); toast('삭제했습니다'); } };
+$('#resetAll').onclick=()=>{ if(confirm('대학 카드·API 키·비식별화 규칙을 모두 지울까요?')){ ['univ_cards','mask_rules','ai_prov','ai_model','ai_key','ai_url','theme'].forEach(k=>store(k,undefined)); loadSettings(); renderUniv(); toast('삭제했습니다'); } };
 
 $('#wipeBtn').onclick=()=>{
   if(!confirm('현재 열려 있는 학생 기록을 모두 지울까요? (대학 카드·설정은 남습니다)')) return;
