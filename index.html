@@ -735,14 +735,25 @@ async function readPdf(fileOrBuf){
   const buf = fileOrBuf instanceof ArrayBuffer ? fileOrBuf : await fileOrBuf.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({data:buf.slice(0)}).promise;
   S.pdf = pdf;
-  const lines=[];
+  const lines=[], rows=[];
   for(let p=1;p<=pdf.numPages;p++){
     const page=await pdf.getPage(p);
     const tc=await page.getTextContent();
     lines.push(...itemsToLines(tc.items));
+    // 표 칸 판별용으로 글자 조각의 좌표도 보관합니다 (같은 높이끼리 한 줄)
+    const rs=[];
+    tc.items.forEach(it=>{
+      if(!it.str || !it.str.trim()) return;
+      const y=Math.round(it.transform[5]);
+      let r=rs.find(r=>Math.abs(r.y-y)<3.2);
+      if(!r){ r={p, y, items:[]}; rs.push(r); }
+      r.items.push({s:it.str, x:it.transform[4], w:it.width||0});
+    });
+    rs.sort((a,b)=>b.y-a.y);
+    rows.push(...rs);
     setStatus(`텍스트 추출 중… ${p}/${pdf.numPages}쪽`);
   }
-  return lines;
+  return {lines, rows};
 }
 
 function setStatus(m){ const n=$('#upStatus'); if(n) n.textContent=m; }
@@ -935,8 +946,10 @@ function scoreAxes(){
     Object.keys(groups).forEach(g=>found[g]=[]);
     parts.forEach(p=>{
       sentencesOf(p.text).forEach(sen=>{
+        // 생기부는 글자 단위로 줄이 바뀌어 띄어쓰기가 흔들리므로 공백을 빼고 비교합니다
+        const senN=sen.replace(/\s+/g,'');
         Object.entries(groups).forEach(([g,kws])=>{
-          const hit = kws.filter(k=>k && sen.includes(k));
+          const hit = kws.filter(k=>k && senN.includes(k.replace(/\s+/g,'')));
           if(hit.length){
             found[g].push(...hit);
             if(ev.length<400) ev.push({where:p.where, sen, kw:hit[0], group:g});
@@ -1163,7 +1176,12 @@ function renderAll(){
   $('#chipSrc').textContent = `기록 ${S.sets.length}건 · 성적 ${S.grades.length}과목 · 문항 ${S.questions.length}`;
 }
 
-function hl(sen,kw){ if(!kw) return esc(sen); return esc(sen).split(esc(kw)).join('<b>'+esc(kw)+'</b>'); }
+function hl(sen,kw){
+  if(!kw) return esc(sen);
+  // 줄바꿈 때문에 키워드 중간에 공백이 끼어도 강조되도록
+  const pat=kw.replace(/\s+/g,'').split('').map(c=>c.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('\\s*');
+  return esc(sen).replace(new RegExp('('+pat+')','g'),'<b>$1</b>');
+}
 
 function renderAxes(){
   const box=$('#axes'); box.innerHTML='';
@@ -1223,19 +1241,20 @@ function renderGrades(){
     ['전체 평균등급', avg!=null?avg:'—'],
     ['주요교과 평균', mr!=null?mr:'—'],
     ['이수 과목 수', S.grades.length],
-    ['총 이수단위', S.grades.reduce((a,b)=>a+(b.unit||0),0)]
+    ['총 이수학점(단위)', S.grades.reduce((a,b)=>a+(b.unit||0),0)]
   ];
   cards.forEach(([k,v])=>{
     sum.appendChild(el('div','axis',`<div class="tiny muted">${k}</div><div class="score">${v}</div>`));
   });
 
   if(!S.grades.length){ t.innerHTML='<tbody><tr><td class="muted small">성적을 자동으로 찾지 못했습니다. 아래 ‘과목 직접 추가’로 입력하시면 진단에 반영됩니다.</td></tr></tbody>'; return; }
-  t.innerHTML=`<thead><tr><th>학년</th><th>학기</th><th>교과</th><th>과목</th><th class="num">단위</th><th class="num">원점수</th><th class="num">평균</th><th>성취도</th><th class="num">등급</th><th></th></tr></thead>`;
+  t.innerHTML=`<thead><tr><th>학년</th><th>학기</th><th>구분</th><th>교과</th><th>과목</th><th class="num">학점</th><th class="num">원점수</th><th class="num">평균</th><th>성취도</th><th class="num">등급</th><th></th></tr></thead>`;
   const tb=el('tbody');
   S.grades.forEach((g,i)=>{
     const tr=el('tr');
     tr.innerHTML=`<td contenteditable data-k="grade" data-i="${i}">${esc(g.grade)}</td>
       <td contenteditable data-k="term" data-i="${i}">${esc(g.term)}</td>
+      <td><span class="pill ${(g.type||'일반')==='일반'?'b':''}" style="font-size:10.5px;white-space:nowrap">${esc(g.type||'일반')}</span></td>
       <td contenteditable data-k="area" data-i="${i}">${esc(g.area)}</td>
       <td contenteditable data-k="name" data-i="${i}"><b>${esc(g.name)}</b></td>
       <td class="num" contenteditable data-k="unit" data-i="${i}">${g.unit??''}</td>
@@ -1550,7 +1569,7 @@ function scanPayload(t){
   if(/\d{6}\s*-\s*\d{7}/.test(t)) hits.push('주민등록번호 형태');
   if(/01[016-9][-\s]?\d{3,4}[-\s]?\d{4}/.test(t)) hits.push('전화번호 형태');
   if(/@[\w-]+\.[\w.]+/.test(t)) hits.push('이메일 형태');
-  if(/(고등학교|중학교)/.test(t)) hits.push('학교명');
+  if(/[가-힣](고등학교|중학교)/.test(t)) hits.push('학교명');   // "고등학교 생활" 같은 일반 낱말은 제외, 이름 붙은 학교만
   const nm=(S.student.name||'').trim();
   if(nm.length>=2 && t.includes(nm)) hits.push('학생 표기');
   return hits;
@@ -1574,10 +1593,12 @@ function buildPayload(){
       if(!rows.length) return;
       L.push(`${y}학년`);
       rows.forEach(r=>{
-        const parts=[`  ${r.term||'-'}학기 ${r.name}`, `${r.unit||'-'}단위`];
+        const kind = r.type && r.type!=='일반' ? ` [${r.type}]` : '';
+        const parts=[`  ${r.term||'-'}학기 ${r.name}${kind}`, `${r.unit||'-'}학점`];
         if(r.raw!=null) parts.push(`원점수 ${r.raw}/과목평균 ${r.avg}`);
-        if(r.ach) parts.push(`성취도 ${r.ach}`);
+        if(r.ach) parts.push(`성취도 ${r.ach}${r.n?`(수강 ${r.n}명)`:''}`);
         if(r.rank!=null) parts.push(`${r.rank}등급`);
+        if(r.dist) parts.push(`분포 ${r.dist}`);
         L.push(parts.join(' · '));
       });
     });
@@ -1591,7 +1612,10 @@ function buildPayload(){
   }
   if(S.acts.length){
     L.push('[창의적 체험활동]');
-    S.acts.forEach(x=>L.push(`(${x.grade||'?'}학년 ${x.kind}) ${deid(x.text)}`));
+    S.acts.forEach(x=>{
+      const extra=[x.club?`동아리: ${deid(x.club)}`:'', x.hope?`희망분야: ${deid(x.hope)}`:''].filter(Boolean).join(' · ');
+      L.push(`(${x.grade||'?'}학년 ${x.kind}${extra?' · '+extra:''}) ${deid(x.text)}`);
+    });
     L.push('');
   }
   if(S.behav.length){
@@ -1681,23 +1705,409 @@ function md2html(t){
 /* ============================================================
    파이프라인
    ============================================================ */
-function ingest(lines){
-  S.rawLines=lines;
-  S.text=lines.join('\n');
+/* ============================================================
+   NEIS 학교생활기록부Ⅱ 좌표 기반 파서
+   입력 rows: [{p, y, items:[{s, x, w}]}]  (쪽 오름차순, 쪽 안에서는 위→아래)
+   - 머리글·1.인적·학적사항은 건너뜁니다 (2.출결상황부터 읽음)
+   - 쪽 꼬리말(학교명·날짜·이름·출력자·IP)은 버립니다
+   ============================================================ */
+function parseNeisRows(rows){
+  const norm = s => String(s==null?'':s).replace(/\s+/g,'');
+  const words = items => {
+    const out=[]; let cur=null;
+    items.forEach(it=>{
+      const end=it.x+(it.w||0);
+      if(cur && it.x-cur.e<=3.5){ cur.s+=it.s; cur.e=end; }
+      else { cur={s:it.s, x:it.x, e:end}; out.push(cur); }
+    });
+    out.forEach(w=>{ w.s=w.s.trim(); });
+    return out.filter(w=>w.s);
+  };
+  const textOf = items => words(items).map(w=>w.s).join(' ');
+
+  const FOOTER=[/\d{4}년\s*\d{1,2}월\s*\d{1,2}일\s*\d+\s*\/\s*\d+/, /\/\s*\d{4}\.\d{2}\.\d{2}\s+\d{1,2}:\d{2}\s*\//];
+  const PAGEHEAD=/^(창의적체험활동상황|교과학습발달상황|행동특성및종합의견|독서활동상황)$/;
+
+  /* ---------- 0. 정리 ---------- */
+  const R=[];
+  rows.forEach(r=>{
+    const items=r.items.filter(i=>i.s && i.s.trim()).sort((a,b)=>a.x-b.x);
+    if(!items.length) return;
+    const t=textOf(items);
+    if(FOOTER.some(re=>re.test(t))) return;
+    R.push({p:r.p, y:r.y, items, t, n:norm(t), x0:items[0].x,
+            x1:Math.max(...items.map(i=>i.x+(i.w||0)))});
+  });
+  if(!R.length) return null;
+  const L0=Math.min(...R.map(r=>r.x0))-2;      // 표 왼쪽 테두리 추정
+
+  /* ---------- 1. 섹션 ---------- */
+  const SECS=[['personal',/^1\.?인적/],['attend',/^2\.?출결/],['award',/^3\.?수상/],['cert',/^4\.?자격/],
+              ['violence',/^5\.?학교폭력/],['career',/^6\.?창의적체험/],['subject',/^7\.?교과학습/],
+              ['book',/^8\.?독서/],['behav',/^9\.?행동특성/]];
+  const sec={head:[]}; let cur='head';
+  R.forEach(r=>{
+    for(const [id,re] of SECS){
+      if(re.test(r.n) && r.n.length<34){ cur=id; sec[cur]=sec[cur]||[]; return; }
+    }
+    if(PAGEHEAD.test(r.n)) return;
+    (sec[cur]=sec[cur]||[]).push(r);
+  });
+
+  /* ---------- 2. 열 경계: 머리글 가운데 위치 → 칸 경계 ----------
+     머리글은 칸 가운데에 찍히므로, 왼쪽 테두리 L0에서 시작해
+     오른쪽 경계 = 2×가운데 − 왼쪽 경계 로 차례로 구합니다. */
+  function colsFrom(headerRows, vocab){
+    const cols=[];
+    headerRows.forEach(r=>words(r.items).forEach(w=>{
+      const v=vocab.find(v=>v.re.test(w.s)); if(!v) return;
+      const c=(w.x+w.e)/2;
+      const k=cols.find(k=>k.key===v.key);
+      if(k) k.cs.push(c); else cols.push({key:v.key, cs:[c]});
+    }));
+    cols.forEach(k=>{ k.c=k.cs.reduce((a,b)=>a+b,0)/k.cs.length; });
+    cols.sort((a,b)=>a.c-b.c);
+    let b=L0; cols.forEach(k=>{ k.l=b; k.r=2*k.c-b; b=k.r; });
+    return cols;
+  }
+  function colOf(cols,x){
+    for(const k of cols) if(x+2>=k.l && x+2<k.r) return k.key;
+    return x+2<cols[0].l ? cols[0].key : cols[cols.length-1].key;
+  }
+  function byCol(cols,items){
+    const o={}; items.forEach(it=>{ const k=colOf(cols,it.x); (o[k]=o[k]||[]).push(it); });
+    const t={}; for(const k in o) t[k]=textOf(o[k]);
+    return {items:o, t};
+  }
+  const isHeaderRow=(r,vocab)=>{ const ws=words(r.items); return ws.length>0 && ws.every(w=>vocab.some(v=>v.re.test(w.s))); };
+
+  /* ---------- 3. 줄 잇기: 줄이 끝까지 찼으면 글자 단위 줄바꿈으로 봅니다 ---------- */
+  const ENDW=/[다함임됨음며고서의를을은는에로와과도만요이가해게]$/;
+  function joinLine(a,b,prevFull){
+    if(!a) return b;
+    if(prevFull && /[가-힣]$/.test(a) && /^[가-힣]/.test(b)) return ENDW.test(a) ? a+' '+b : a+b;
+    return a+' '+b;
+  }
+
+  /* ---------- 4. 라벨 칸 + 서술 칸 표 (창체·행특) ----------
+     · 서술은 칸 단위 문단이므로 줄이 덜 찬 곳에서 문단을 끊습니다.
+     · 라벨(영역·학년)은 칸 세로 가운데에 찍힙니다. 그래서 칸 끝 ≈ 2×라벨줄 − 칸 시작 으로
+       경계를 추정한 뒤, 가장 가까운 문단 경계에 맞춥니다(쪽마다 따로).
+     · 쪽 첫머리의 라벨 없는 문단은, 앞 쪽 마지막 줄이 꽉 찼으면(문장 중간에서 끊김)
+       앞 칸의 이어짐으로, 아니면 그 쪽 첫 칸의 시작으로 봅니다.
+     · '희망분야'로 시작하는 문단은 반드시 새 칸(진로활동)의 시작입니다. */
+  function labeledBlocks(rowsIn, cols, textKey, primary){
+    const lines=[], marks=[];
+    rowsIn.forEach(r=>{
+      const s=byCol(cols, r.items);
+      const lab={}; Object.keys(s.t).forEach(k=>{ if(k!==textKey && s.t[k].trim()) lab[k]=s.t[k].trim(); });
+      if(s.items[textKey]){
+        const its=s.items[textKey];
+        lines.push({p:r.p, y:r.y, t:textOf(its), end:Math.max(...its.map(i=>i.x+(i.w||0)))});
+      }
+      if(Object.keys(lab).length) marks.push({p:r.p, y:r.y, lab});
+    });
+    if(!lines.length) return [];
+    const right=Math.max(...lines.map(l=>l.end));
+    lines.forEach((l,i)=>{ l.full = l.end >= right-6; l.i=i; });
+
+    // 문단 → 쪽 단위 조각
+    const pieces=[];
+    lines.forEach((l,i)=>{
+      const prev=lines[i-1];
+      if(!prev || !prev.full || prev.p!==l.p) pieces.push({p:l.p, s:i, e:i, labs:[], primIdx:null, lead:/^희망\s*분야/.test(l.t)});
+      else pieces[pieces.length-1].e=i;
+    });
+    // 라벨 → 가장 가까운 줄(같은 쪽) → 그 줄이 속한 조각
+    marks.forEach(m=>{
+      let bi=-1, bd=1e9;
+      lines.forEach((l,i)=>{ if(l.p!==m.p) return; const d=Math.abs(l.y-m.y); if(d<bd){ bd=d; bi=i; } });
+      if(bi<0 || bd>20) return;
+      const pc=pieces.find(pc=>pc.s<=bi && bi<=pc.e);
+      if(!pc) return;
+      pc.labs.push(m.lab);
+      if(m.lab[primary] && pc.primIdx===null) pc.primIdx=bi;
+    });
+
+    const groups=[];
+    const pages=[...new Set(pieces.map(pc=>pc.p))];
+    pages.forEach(p=>{
+      const pcs=pieces.filter(pc=>pc.p===p);
+      const labeled=pcs.filter(pc=>pc.primIdx!==null);
+      const last=groups[groups.length-1];
+      const prevFull = last ? lines[last.e].full : false;
+      if(!labeled.length){                       // 라벨 없는 쪽 → 앞 칸에 이어짐
+        if(last){ last.e=pcs[pcs.length-1].e; pcs.forEach(pc=>last.labs.push(...pc.labs)); }
+        else groups.push({s:pcs[0].s, e:pcs[pcs.length-1].e, labs:pcs.flatMap(pc=>pc.labs)});
+        return;
+      }
+      const firstL=pcs.indexOf(labeled[0]);
+      let start=pcs[0].s;
+      if(firstL>0 && last && prevFull && !pcs[0].lead){   // 쪽 첫머리 = 앞 칸 이어짐
+        // 이어지는 부분은 첫 문단 하나뿐(문장이 끝나는 곳까지)
+        last.e=pcs[0].e; last.labs.push(...pcs[0].labs);
+        start=(pcs[1]||labeled[0]).s;
+      }
+      labeled.forEach((L,j)=>{
+        const next=labeled[j+1];
+        let split;
+        if(!next) split=pcs[pcs.length-1].e+1;
+        else{
+          // 후보 경계: L 다음 조각들의 시작 ~ next 조각 시작
+          const cand=pcs.filter(pc=>pc.s>L.e && pc.s<=next.s).map(pc=>pc.s);
+          const leadAt=pcs.find(pc=>pc.lead && pc.s>L.e && pc.s<=next.s);
+          const est=2*L.primIdx - start + 1;
+          let pool=leadAt ? cand.filter(c=>c<=leadAt.s) : cand;
+          if(!pool.length) pool=cand.length?cand:[next.s];
+          split=pool.reduce((a,b)=>Math.abs(b-est)<Math.abs(a-est)?b:a);
+        }
+        const g={s:start, e:split-1, labs:[]};
+        pcs.forEach(pc=>{ if(pc.s>=g.s && pc.e<=g.e) g.labs.push(...pc.labs); });
+        groups.push(g);
+        start=split;
+      });
+    });
+
+    // 같은 주라벨이 연달아 나오면(쪽 넘김으로 라벨 반복) 합치기
+    const merged=[];
+    groups.forEach(g=>{
+      const lab=g.labs.reduce((a,b)=>Object.assign({},b,a),{});   // 먼저 나온 값 우선
+      const m=merged[merged.length-1];
+      if(m && lab[primary] && m.lab[primary] && norm(m.lab[primary])===norm(lab[primary])){
+        m.e=g.e; Object.keys(lab).forEach(k=>{ if(!m.lab[k]) m.lab[k]=lab[k]; }); return;
+      }
+      merged.push({s:g.s, e:g.e, lab});
+    });
+    return merged.map(g=>{
+      const ls=lines.slice(g.s, g.e+1);
+      let t=''; ls.forEach((l,i)=>{ t=joinLine(t, l.t, i>0 && ls[i-1].full); });
+      return {lab:g.lab, lines:ls, text:t.replace(/\s+/g,' ').trim()};
+    });
+  }
+  function sameLab(a,b){ return Object.keys(b).every(k=>!a[k] || norm(a[k])===norm(b[k])); }
+
+  /* ---------- 5. 창의적 체험활동 ---------- */
+  const CV=[{key:'year',re:/^학년$/},{key:'kind',re:/^영역$/},{key:'hours',re:/^시간$/},{key:'text',re:/^특기사항$/}];
+  const KIND=[['자율',0],['동아리',1],['봉사',2],['진로',3]];
+  function parseActs(list){
+    if(!list||!list.length) return [];
+    const head=[], body=[];
+    let cols=null, buf=[], stop=false;
+    list.forEach(r=>{
+      if(stop) return;
+      if(/^<?봉사활동실적/.test(r.n)){ stop=true; return; }   // 뒤따르는 봉사활동실적 표는 다른 형식
+      if(isHeaderRow(r,CV)){ buf.push(r); return; }
+      if(buf.length){ const c=colsFrom(buf,CV); buf=[]; if(c.find(k=>k.key==='text')) cols=c; }
+      if(cols) body.push(r);
+    });
+    if(!cols || !cols.find(c=>c.key==='text')) return [];
+    const blocks=labeledBlocks(body, cols, 'text', 'kind');
+    // 같은 영역이 이어지면(쪽 넘김) 합치기
+    const merged=[];
+    blocks.forEach(b=>{
+      const kind=(b.lab.kind||'').replace(/\s/g,'');
+      const last=merged[merged.length-1];
+      if(last && (!kind || norm(last.kind)===kind)){ last.text=joinLine(last.text,b.text,false); if(b.lab.year) last.yearHint=last.yearHint||b.lab.year; return; }
+      merged.push({kind, hours:(b.lab.hours||'').trim(), yearHint:(b.lab.year||'').trim(), text:b.text, first:(b.lines[0]&&b.lines[0].t)||''});
+    });
+    // 학년: 영역 순서가 되돌아가면 다음 학년
+    let year=1, prevOrd=-1;
+    return merged.map(m=>{
+      const ord=(KIND.find(k=>m.kind.indexOf(k[0])===0)||[0,9])[1];
+      if(prevOrd>=0 && ord<=prevOrd) year++;
+      const hint=parseInt(m.yearHint,10); if(hint>year) year=hint;
+      prevOrd=ord;
+      let text=m.text, club='', hope='';
+      const c=text.match(/^\(([^)]{1,30})\)\s*(?:\(\s*\d+\s*시간\s*\))?\s*/);
+      if(c && /동아리/.test(m.kind)){ club=c[1]; text=text.slice(c[0].length); }
+      const hm=m.first.match(/^희망\s*분야\s*:?\s*(.*)$/);      // 희망분야는 칸 첫 줄 한 줄
+      if(hm){ hope=hm[1].trim(); const at=text.indexOf(hope); if(/^희망/.test(text) && at>=0) text=text.slice(at+hope.length).trim(); }
+      const kindName = m.kind.replace(/^자율·?자치/,'자율·자치').replace(/활동$/,'')+'활동';
+      return {grade:year, kind:kindName, hours:m.hours, club, hope, text:text.trim()};
+    }).filter(a=>a.text.length>15);
+  }
+
+  /* ---------- 6. 교과학습발달상황 ---------- */
+  const GV=[
+    {key:'term',re:/^학기$/},{key:'area',re:/^교과$/},{key:'subj',re:/^과목$/},
+    {key:'unit',re:/^(학점수|단위수|학점|수)$/},
+    {key:'score',re:/^(원점수|\(표준|편차\)|\(표준편차\))/},
+    {key:'ach',re:/^(성취도(\(수강자수\))?|\(수강자수\)|이수여부)$/},
+    {key:'rank',re:/^석차등급$/},
+    {key:'dist',re:/^(성취도별|분포비율|분포비율\(%\))/},
+    {key:'note',re:/^비고$/}];
+  const AREA_ORD=[[/^국어/,0],[/^수학/,1],[/^영어/,2],[/^한국사/,3],[/^사회/,4],[/^과학/,5],[/^체육/,6],[/^예술/,7],[/^(기술|정보|제2|한문|교양)/,8]];
+  const SUBJ_ORD={정보:8,진로와직업:8,철학:8,공학일반:8,논리학:8,심리학:8,교육학:8,보건:8,환경:8};
+  const ordOf=(area,subj)=>{ for(const [re,o] of AREA_ORD) if(re.test(norm(area))) return o; return SUBJ_ORD[norm(subj)] ?? 9; };
+
+  function parseSubjects(list){
+    const grades=[], sets=[];
+    if(!list||!list.length) return {grades,sets};
+    let year=null, mode='일반', cols=null, hbuf=[], tbl=null, setRows=null;
+
+    const flushTable=()=>{
+      if(!tbl || !tbl.data.length){ tbl=null; return; }
+      /* 줄바꿈된 교과·과목 조각 붙이기.
+         칸은 세로 가운데 정렬이라 조각은 숫자 행의 위·아래에 같은 거리로 짝지어 생깁니다.
+         ① 대칭 짝을 먼저 붙이고 ② 남은 조각은 사이에 다른 행이 없는 가장 가까운 행에 붙입니다. */
+      const useful=tbl.frags.filter(f=>(f.t.area||f.t.subj));
+      const between=(d,f)=>tbl.data.some(o=>o!==d && o.p===d.p && o.y<Math.max(d.y,f.y) && o.y>Math.min(d.y,f.y));
+      let free=[...useful], changed=true;
+      while(changed){
+        changed=false;
+        tbl.data.forEach(d=>{
+          const ups=free.filter(f=>f.p===d.p && f.y>d.y && f.y-d.y<=40 && !between(d,f)).sort((a,b)=>a.y-b.y);
+          const dns=free.filter(f=>f.p===d.p && f.y<d.y && d.y-f.y<=40 && !between(d,f)).sort((a,b)=>b.y-a.y);
+          if(ups.length && dns.length && Math.abs((ups[0].y-d.y)-(d.y-dns[0].y))<=3){
+            d.above.push(ups[0]); d.below.push(dns[0]);
+            free=free.filter(f=>f!==ups[0] && f!==dns[0]); changed=true;
+          }
+        });
+      }
+      free.forEach(f=>{
+        let best=null, bd=1e9;
+        tbl.data.forEach(d=>{ if(d.p!==f.p || between(d,f)) return; const dd=Math.abs(d.y-f.y); if(dd<bd){ bd=dd; best=d; } });
+        if(best && bd<24) (f.y>best.y ? best.above : best.below).push(f);
+      });
+      let term=1, prevOrd=-1, seen=new Set();
+      tbl.data.forEach(d=>{
+        const pick=k=>[...d.above.sort((a,b)=>b.y-a.y).map(f=>f.t[k]||''), d.t[k]||'', ...d.below.sort((a,b)=>b.y-a.y).map(f=>f.t[k]||'')]
+                       .filter(Boolean).join('');
+        const area=pick('area'), subj=pick('subj');
+        const key=norm(area)+'|'+norm(subj), ord=ordOf(area,subj);
+        if(term===1 && prevOrd>=0 && (ord<prevOrd || seen.has(key))){ term=2; seen=new Set(); }
+        if(/^2$/.test((d.t.term||'').trim())) term=2;
+        prevOrd=ord; seen.add(key);
+        const sc=(d.t.score||'').match(/(\d{1,3})\s*\/\s*(\d{1,3}(?:\.\d+)?)(?:\s*\(\s*(\d{1,3}(?:\.\d+)?)\s*\))?/);
+        const ac=(d.t.ach||'').match(/([A-E]|P)(?:\s*\(\s*(\d{1,4})\s*\))?/);
+        const rk=(d.t.rank||'').trim().match(/^([1-9])$/);
+        grades.push({grade:tbl.year||'', term, area, name:subj||area, unit:parseInt(d.t.unit,10)||null,
+          raw:sc?+sc[1]:null, avg:sc?+sc[2]:null, sd:sc&&sc[3]?+sc[3]:null,
+          ach:ac?ac[1]:'', n:ac&&ac[2]?+ac[2]:null, rank:rk?+rk[1]:null,
+          dist:(d.t.dist||'').trim(), note:(d.t.note||'').trim(), type:tbl.mode});
+      });
+      tbl=null;
+    };
+    const flushSets=()=>{
+      if(!setRows){ return; }
+      const known=new Set(grades.filter(g=>g.grade===year).map(g=>norm(g.name)));
+      const loose=s=>norm(s).replace(/Ⅰ/g,'I').replace(/Ⅱ/g,'II').toUpperCase();
+      const knownLoose=new Set([...known].map(loose));
+      const right=Math.max(...setRows.map(r=>r.x1));
+      let curS=null, prevFull=false;
+      setRows.forEach(r=>{
+        if(/^해당사항없음$/.test(r.n)) return;
+        const m=r.t.match(/^(.{1,24}?)\s*[:：]\s*(.*)$/);
+        if(m && (known.has(norm(m[1])) || knownLoose.has(loose(m[1])))){
+          curS={grade:year||'', subject:m[1].trim(), text:m[2]}; sets.push(curS);
+        } else if(curS){
+          curS.text=joinLine(curS.text, r.t, prevFull);
+        }
+        prevFull = r.x1 >= right-6;
+      });
+      setRows=null;
+    };
+
+    list.forEach(r=>{
+      let m;
+      if((m=r.n.match(/^\[([1-3])학년\]$/))){ flushTable(); flushSets(); year=+m[1]; mode='일반'; return; }
+      if((m=r.n.match(/^\[([1-3])학년세부능력/))){ flushTable(); flushSets(); year=+m[1]; setRows=[]; return; }
+      if(/^<(진로선택과목|진로선택)/.test(r.n)){ flushTable(); flushSets(); mode='진로선택'; return; }
+      if(/^<체육[ㆍ·・.]?예술/.test(r.n)){ flushTable(); flushSets(); mode='체육예술'; return; }
+      if(/^<교양/.test(r.n)){ flushTable(); flushSets(); mode='교양'; return; }
+      if(/^<일반/.test(r.n)){ flushTable(); flushSets(); mode='일반'; return; }
+      if(/^과목세부능력/.test(r.n)){ if(setRows) return; flushTable(); setRows=[]; return; }   // 쪽마다 반복되는 머리글은 무시
+      if(/^이수(학점|단위)합계/.test(r.n)) return;
+      if(isHeaderRow(r,GV)){ flushSets(); hbuf.push(r); return; }
+      if(hbuf.length){ cols=colsFrom(hbuf,GV); hbuf=[]; if(!tbl) tbl={year, mode, data:[], frags:[]}; }
+      if(setRows){ setRows.push(r); return; }
+      if(!cols) return;
+      if(!tbl) tbl={year, mode, data:[], frags:[]};
+      const s=byCol(cols, r.items);
+      const unitOk=/^\d{1,2}$/.test((s.t.unit||'').trim());
+      if(unitOk && (s.t.score || s.t.ach)) tbl.data.push({p:r.p, y:r.y, t:s.t, above:[], below:[]});
+      else tbl.frags.push({p:r.p, y:r.y, t:s.t});
+    });
+    flushTable(); flushSets();
+    // 성적표 과목명은 칸 안에서 줄바꿈돼 띄어쓰기가 틀릴 수 있으므로 세특 라벨 표기로 바로잡습니다
+    grades.forEach(g=>{ const s=sets.find(x=>x.grade===g.grade && norm(x.subject)===norm(g.name)); if(s) g.name=s.subject; });
+    return {grades, sets};
+  }
+
+  /* ---------- 7. 행동특성 및 종합의견 ---------- */
+  const BV=[{key:'year',re:/^학년$/},{key:'text',re:/^(행동특성|및종합의견|행동특성및종합의견|및|종합의견)$/}];
+  function parseBehav(list){
+    if(!list||!list.length) return [];
+    let cols=null, buf=[]; const body=[];
+    list.forEach(r=>{
+      if(isHeaderRow(r,BV)){ buf.push(r); return; }
+      if(buf.length){ cols=colsFrom(buf,BV); buf=[]; }
+      if(cols) body.push(r);
+    });
+    if(!cols) return [];
+    let year=0;
+    return labeledBlocks(body, cols, 'text', 'year').map(b=>{
+      const y=parseInt(b.lab.year,10); if(y) year=y; else year=year||1;
+      return {grade:year, text:b.text};
+    }).filter(b=>b.text.replace(/[.\s]/g,'').length>10);
+  }
+
+  const S={grades:[], sets:[]};
+  Object.assign(S, parseSubjects(sec.subject));
+  const acts=parseActs(sec.career);
+  const behav=parseBehav(sec.behav);
+  // 원문 보기용: 2.출결 이후, 꼬리말 제외
+  const startIdx=R.findIndex(r=>/^2\.?출결/.test(r.n));
+  const lines=(startIdx>=0?R.slice(startIdx):R).map(r=>r.t);
+  return {grades:S.grades, sets:S.sets, acts, behav, lines};
+}
+
+/* 쪽 꼬리말(학교명·출력일·쪽수·학생 이름·출력자·IP)은 내용이 아니고 개인정보가 섞여 있어 항상 버립니다 */
+const FOOTER_RE=[/\d{4}년\s*\d{1,2}월\s*\d{1,2}일\s*\d+\s*\/\s*\d+/, /\/\s*\d{4}\.\d{2}\.\d{2}\s+\d{1,2}:\d{2}\s*\//];
+const isFooterLine=l=>FOOTER_RE.some(re=>re.test(l));
+
+function ingest(lines, rows){
+  lines=lines.filter(l=>!isFooterLine(l));
+
+  // 기준선: 줄 기반 파서 (붙여넣기, 또는 좌표 파서가 못 읽은 항목의 대체용)
   S.sections=splitSections(lines);
   const sub=S.sections.subject||[];
   S.grades=parseGrades(sub);
   S.sets=parseSets(sub);
   S.acts=parseActs(S.sections.career||[]);
   S.behav=parseBehav(S.sections.behav||[]);
-  // 파싱이 빈약하면 전체 텍스트로 재시도
   if(!S.sets.length) S.sets=parseSets(lines);
   if(!S.acts.length) S.acts=parseActs(lines);
   if(!S.grades.length) S.grades=parseGrades(lines);
   fixSetGrades();
+  const L={grades:S.grades, sets:S.sets, acts:S.acts, behav:S.behav};
+
+  // PDF면 좌표 기반 NEIS 파서를 우선하고, 항목별로 비어 있으면 기준선 결과를 씁니다
+  let n=null;
+  if(rows && rows.length){
+    try{ n=parseNeisRows(rows); }catch(e){ console.warn('NEIS 파서 실패, 기본 파서로 전환', e); }
+  }
+  if(n && (n.grades.length || n.sets.length || n.acts.length || n.behav.length)){
+    S.parser='neis';
+    S.rawLines=n.lines;                         // 인적·학적사항과 쪽 꼬리말은 제외됨
+    S.grades = n.grades.length>=L.grades.length ? n.grades : L.grades;
+    S.sets   = n.sets.length  ? n.sets  : L.sets;
+    S.acts   = n.acts.length  ? n.acts  : L.acts;
+    S.behav  = n.behav.length ? n.behav : L.behav;
+    // 탐구 주제는 줄바꿈으로 끊기지 않은 서술문에서 찾습니다
+    S.text=[...S.sets.map(s=>s.text), ...S.acts.map(a=>a.text), ...S.behav.map(b=>b.text)].join('\n');
+  } else {
+    S.parser='line';
+    S.rawLines=lines;
+    S.text=lines.join('\n');
+  }
+  finishIngest();
+}
+function finishIngest(){
   S.topics=parseTopics(S.text);
   recompute();
-  setStatus(`판독 완료 · 성적 ${S.grades.length}과목 / 세특 ${S.sets.length}건 / 창체 ${S.acts.length}건 / 문항 ${S.questions.length}개`);
+  const how = S.parser==='neis' ? 'NEIS 양식 인식' : '일반 텍스트';
+  setStatus(`판독 완료(${how}) · 성적 ${S.grades.length}과목 / 세특 ${S.sets.length}건 / 창체 ${S.acts.length}건 / 행특 ${S.behav.length}건 / 문항 ${S.questions.length}개`);
   toast('판독이 끝났습니다');
   go('read');
 }
@@ -1761,9 +2171,9 @@ async function handleFile(f){
   if(!window.pdfjsLib) return toast('PDF 라이브러리를 불러오지 못했습니다. 인터넷 연결 후 새로고침하거나 텍스트 붙여넣기를 쓰세요.');
   setStatus('PDF를 읽는 중…');
   try{
-    const lines=await readPdf(f);
+    const {lines, rows}=await readPdf(f);
     if(lines.join('').length<100){ setStatus('텍스트를 찾지 못했습니다. 스캔된 이미지 PDF일 수 있습니다 → ‘텍스트로 직접 붙여넣기’를 이용하세요.'); return; }
-    ingest(lines);
+    ingest(lines, rows);
   }catch(e){ setStatus('읽기 실패: '+e.message); }
 }
 
